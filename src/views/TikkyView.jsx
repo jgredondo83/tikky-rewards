@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 
 const KITCHEN_NAME  = 'Cocina + limpieza'
@@ -60,6 +60,23 @@ function checkStreak(entries, n) {
   return false
 }
 
+// ── Notificaciones ──────────────────────────────────────────────────────────
+function msUntilHour(h) {
+  const now = new Date()
+  const target = new Date()
+  target.setHours(h, 0, 0, 0)
+  if (target <= now) target.setDate(target.getDate() + 1)
+  return target - now
+}
+
+function sendNotif(title, body) {
+  if (Notification.permission !== 'granted') return
+  navigator.serviceWorker?.ready
+    .then(reg => reg.showNotification(title, { body, icon: '/icon-192.png', badge: '/icon-192.png' }))
+    .catch(() => { try { new Notification(title, { body, icon: '/icon-192.png' }) } catch {} })
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 export default function TikkyView({ onAdminPress }) {
   const [activities, setActivities] = useState([])
   const [weekEntries, setWeekEntries] = useState([])
@@ -70,16 +87,57 @@ export default function TikkyView({ onAdminPress }) {
   const [showHistory, setShowHistory] = useState(false)
   const [dupModal, setDupModal] = useState(null)
 
-  // Estado bono cocina
-  const [kitchenDays, setKitchenDays] = useState(0)       // días registrados esta semana
-  const [kitchenClaimed, setKitchenClaimed] = useState(false) // bono 50€ ya cobrado esta semana
-  const [kitchenToday, setKitchenToday] = useState(false)  // ya registrado hoy
+  // Bono cocina
+  const [kitchenDays, setKitchenDays] = useState(0)
+  const [kitchenClaimed, setKitchenClaimed] = useState(false)
+  const [kitchenToday, setKitchenToday] = useState(false)
   const [kitchenLoading, setKitchenLoading] = useState(false)
   const [claimLoading, setClaimLoading] = useState(false)
 
+  // Notificaciones
+  const notifScheduled = useRef(false)
+  const [notifPerm, setNotifPerm] = useState(() =>
+    ('Notification' in window) ? Notification.permission : 'unsupported'
+  )
+
   const { monday, sunday } = getWeekBounds()
 
-  useEffect(() => { loadAll() }, [])
+  useEffect(() => {
+    loadAll()
+    if ('Notification' in window && Notification.permission === 'granted') {
+      scheduleNotifications()
+    }
+  }, [])
+
+  function scheduleNotifications() {
+    if (notifScheduled.current) return
+    notifScheduled.current = true
+
+    // 15:00 — recordatorio de tarde
+    setTimeout(() => {
+      sendNotif('Tikky Rewards 💪', '¿Cómo va el día? Si has hecho algo, no olvides registrarlo 💪')
+      setInterval(
+        () => sendNotif('Tikky Rewards 💪', '¿Cómo va el día? Si has hecho algo, no olvides registrarlo 💪'),
+        24 * 3600 * 1000
+      )
+    }, msUntilHour(15))
+
+    // 22:00 — recordatorio nocturno
+    setTimeout(() => {
+      sendNotif('Tikky Rewards 🌙', 'Antes de dormir, ¿registraste todo lo de hoy? Cada actividad cuenta 🌙')
+      setInterval(
+        () => sendNotif('Tikky Rewards 🌙', 'Antes de dormir, ¿registraste todo lo de hoy? Cada actividad cuenta 🌙'),
+        24 * 3600 * 1000
+      )
+    }, msUntilHour(22))
+  }
+
+  async function requestNotifPermission() {
+    if (!('Notification' in window)) return
+    const result = await Notification.requestPermission()
+    setNotifPerm(result)
+    if (result === 'granted') scheduleNotifications()
+  }
 
   async function loadAll() {
     setLoading(true)
@@ -100,10 +158,9 @@ export default function TikkyView({ onAdminPress }) {
     setWeekEntries(weekData)
     setAllEntries(allData)
 
-    // Calcular estado del bono cocina desde las entradas de esta semana
     const kitchenDayEntries = weekData.filter(e => e.activity_name === KITCHEN_NAME && e.reward === 0)
-    const claimed = weekData.some(e => e.activity_name === KITCHEN_NAME && e.reward === KITCHEN_BONUS)
-    const todayStr = formatDate(new Date())
+    const claimed     = weekData.some(e => e.activity_name === KITCHEN_NAME && e.reward === KITCHEN_BONUS)
+    const todayStr    = formatDate(new Date())
     const loggedToday = kitchenDayEntries.some(e => formatDate(new Date(e.logged_at)) === todayStr)
 
     setKitchenDays(kitchenDayEntries.length)
@@ -112,13 +169,11 @@ export default function TikkyView({ onAdminPress }) {
     setLoading(false)
   }
 
-  // Registrar un día de cocina (reward=0)
   async function logKitchenDay() {
     if (kitchenLoading || kitchenToday || kitchenDays >= KITCHEN_GOAL || kitchenClaimed) return
     setKitchenLoading(true)
-    const kitchenAct = activities.find(a => a.name === KITCHEN_NAME)
     await supabase.from('entries').insert({
-      activity_id:    kitchenAct?.id ?? null,
+      activity_id:    null,
       activity_name:  KITCHEN_NAME,
       activity_emoji: KITCHEN_EMOJI,
       reward:         0,
@@ -128,13 +183,11 @@ export default function TikkyView({ onAdminPress }) {
     setKitchenLoading(false)
   }
 
-  // Cobrar el bono de 50€ (reward=50)
   async function claimKitchenBonus() {
     if (claimLoading || kitchenClaimed || kitchenDays < KITCHEN_GOAL) return
     setClaimLoading(true)
-    const kitchenAct = activities.find(a => a.name === KITCHEN_NAME)
     await supabase.from('entries').insert({
-      activity_id:    kitchenAct?.id ?? null,
+      activity_id:    null,
       activity_name:  KITCHEN_NAME,
       activity_emoji: KITCHEN_EMOJI,
       reward:         KITCHEN_BONUS,
@@ -144,7 +197,6 @@ export default function TikkyView({ onAdminPress }) {
     setClaimLoading(false)
   }
 
-  // Registrar actividad normal
   async function doLog(activity) {
     setLogging(activity.id)
     await supabase.from('entries').insert({
@@ -187,16 +239,14 @@ export default function TikkyView({ onAdminPress }) {
     setDeletingId(null)
   }
 
-  // Solo las entradas con reward>0 suman al total visible
   const weekTotal = weekEntries.reduce((s, e) => s + (e.reward || 0), 0)
   const allTotal  = allEntries.reduce((s, e) => s + (e.reward || 0), 0)
-
-  const todayKey = formatDate(new Date())
+  const todayKey  = formatDate(new Date())
 
   const dailyData = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(monday)
     d.setDate(monday.getDate() + i)
-    const key = formatDate(d)
+    const key   = formatDate(d)
     const total = weekEntries
       .filter(e => formatDate(new Date(e.logged_at)) === key)
       .reduce((s, e) => s + (e.reward || 0), 0)
@@ -204,17 +254,19 @@ export default function TikkyView({ onAdminPress }) {
   })
   const maxDay = Math.max(...dailyData.map(d => d.value), 1)
 
-  const motiv = MOTIVATIONAL.find(m => weekTotal >= m.min && weekTotal < m.max) || MOTIVATIONAL[MOTIVATIONAL.length - 1]
+  const motiv       = MOTIVATIONAL.find(m => weekTotal >= m.min && weekTotal < m.max) || MOTIVATIONAL[MOTIVATIONAL.length - 1]
   const earnedBadges = BADGES.filter(b => b.check(weekEntries, weekTotal, allTotal))
+  const kitchenPct  = Math.min((kitchenDays / KITCHEN_GOAL) * 100, 100)
 
-  const kitchenPct = Math.min((kitchenDays / KITCHEN_GOAL) * 100, 100)
+  // Actividades sin "Cocina + limpieza" (tiene su propia sección)
+  const displayActivities = activities.filter(a => a.name !== KITCHEN_NAME)
 
   const todayEntryNames = weekEntries
     .filter(e => formatDate(new Date(e.logged_at)) === todayKey)
     .map(e => e.activity_name)
-  const pendingToday = activities.filter(a => !todayEntryNames.includes(a.name))
+  const pendingToday = displayActivities.filter(a => !todayEntryNames.includes(a.name))
 
-  // Historial: excluir entradas de cocina con reward=0 (no son €, no tiene sentido mostrarlas como ganancia)
+  // Historial: excluir marcas de día de cocina sin €
   const historyEntries = weekEntries.filter(e => !(e.activity_name === KITCHEN_NAME && e.reward === 0))
 
   return (
@@ -271,6 +323,33 @@ export default function TikkyView({ onAdminPress }) {
           )}
         </div>
 
+        {/* Banner de notificaciones — solo si no hay permiso aún */}
+        {notifPerm === 'default' && (
+          <button
+            onClick={requestNotifPermission}
+            className="w-full bg-white border border-[#E2E8F0] rounded-2xl px-4 py-3 flex items-center gap-3 text-left active:bg-[#F0FDFA]"
+          >
+            <span className="text-xl">🔔</span>
+            <div className="flex-1">
+              <p className="text-sm font-medium text-gray-800">Activar recordatorios</p>
+              <p className="text-xs text-gray-400">Avisos a las 15:00 y 22:00</p>
+            </div>
+            <span className="text-xs text-tikky-pink font-medium">Activar →</span>
+          </button>
+        )}
+        {notifPerm === 'granted' && (
+          <div className="w-full bg-[#F0FDFA] border border-tikky-lavender rounded-2xl px-4 py-3 flex items-center gap-3">
+            <span className="text-xl">🔔</span>
+            <p className="text-sm text-tikky-pink font-medium">Recordatorios activos — 15:00 y 22:00</p>
+          </div>
+        )}
+        {notifPerm === 'denied' && (
+          <div className="w-full bg-gray-50 border border-[#E2E8F0] rounded-2xl px-4 py-3 flex items-center gap-3">
+            <span className="text-xl">🔕</span>
+            <p className="text-sm text-gray-400">Notificaciones bloqueadas en ajustes del sistema</p>
+          </div>
+        )}
+
         {/* Actividades */}
         <section>
           <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2 px-1">Actividades</h2>
@@ -280,7 +359,7 @@ export default function TikkyView({ onAdminPress }) {
             </div>
           ) : (
             <div className="space-y-2">
-              {activities.map((act) => (
+              {displayActivities.map((act) => (
                 <button
                   key={act.id}
                   onClick={() => logActivity(act)}
@@ -303,7 +382,6 @@ export default function TikkyView({ onAdminPress }) {
 
         {/* ── Bono Cocina + Limpieza ── */}
         <section className="bg-white rounded-2xl p-4 border border-[#E2E8F0] space-y-3">
-          {/* Cabecera */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-xl">{KITCHEN_EMOJI}</span>
@@ -315,7 +393,6 @@ export default function TikkyView({ onAdminPress }) {
             <span className="text-lg">🏅</span>
           </div>
 
-          {/* Barra de progreso */}
           <div className="h-2 bg-tikky-lavender rounded-full overflow-hidden">
             <div
               className="h-full bg-tikky-pink rounded-full transition-all duration-500"
@@ -323,41 +400,32 @@ export default function TikkyView({ onAdminPress }) {
             />
           </div>
 
-          {/* Botón principal — cambia según el estado */}
           {kitchenClaimed ? (
-            // Estado: bono ya cobrado esta semana
             <div className="w-full bg-[#F0FDFA] border border-tikky-lavender text-tikky-pink font-semibold py-3 rounded-2xl text-sm text-center">
               ✓ Bono cobrado esta semana
             </div>
           ) : kitchenDays >= KITCHEN_GOAL ? (
-            // Estado: 5 días completados, listo para cobrar
             <button
               onClick={claimKitchenBonus}
               disabled={claimLoading}
-              className="w-full bg-tikky-pink text-white font-bold py-3 rounded-2xl text-sm active:opacity-80 transition-opacity"
+              className="w-full bg-tikky-pink text-white font-bold py-3 rounded-2xl text-sm active:opacity-80"
             >
               {claimLoading ? '⏳ Procesando...' : '💰 Cobrar 50€'}
             </button>
           ) : kitchenToday ? (
-            // Estado: ya registrado hoy
-            <button
-              disabled
-              className="w-full bg-[#F0FDFA] border border-tikky-lavender text-gray-400 font-medium py-3 rounded-2xl text-sm cursor-not-allowed"
-            >
+            <button disabled className="w-full bg-[#F0FDFA] border border-tikky-lavender text-gray-400 font-medium py-3 rounded-2xl text-sm cursor-not-allowed">
               ✓ Ya registrado hoy — vuelve mañana
             </button>
           ) : (
-            // Estado: pendiente de registrar hoy
             <button
               onClick={logKitchenDay}
               disabled={kitchenLoading}
-              className="w-full bg-white border-2 border-tikky-pink text-tikky-pink font-semibold py-3 rounded-2xl text-sm active:bg-tikky-soft transition-colors"
+              className="w-full bg-white border-2 border-tikky-pink text-tikky-pink font-semibold py-3 rounded-2xl text-sm active:bg-tikky-soft"
             >
               {kitchenLoading ? '⏳...' : `${KITCHEN_EMOJI} Registrar día de cocina`}
             </button>
           )}
 
-          {/* Mensaje de ánimo cuando está cerca */}
           {kitchenDays > 0 && kitchenDays < KITCHEN_GOAL && !kitchenClaimed && (
             <p className="text-xs text-gray-400 text-center">
               Te quedan {KITCHEN_GOAL - kitchenDays} día{KITCHEN_GOAL - kitchenDays > 1 ? 's' : ''} para el bono 🎯

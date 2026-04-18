@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tikky-v1'
+const CACHE_NAME = 'tikky-v2'
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -23,7 +23,6 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const { request } = event
-  // Solo cache GET requests que no sean API de Supabase
   if (request.method !== 'GET' || request.url.includes('supabase.co')) return
 
   event.respondWith(
@@ -36,6 +35,19 @@ self.addEventListener('fetch', (event) => {
         return response
       })
       return cached || networkFetch
+    })
+  )
+})
+
+// Al pulsar una notificación: abrir o enfocar la app
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close()
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) return client.focus()
+      }
+      if (clients.openWindow) return clients.openWindow('/')
     })
   )
 })

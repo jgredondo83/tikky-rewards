@@ -1,6 +1,24 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 
+const KITCHEN_NAME  = 'Cocina + limpieza'
+const KITCHEN_EMOJI = '🍳'
+const KITCHEN_GOAL  = 5
+const KITCHEN_BONUS = 50
+
+function getWeekBounds() {
+  const now = new Date()
+  const day = now.getDay()
+  const diffToMonday = (day === 0 ? -6 : 1 - day)
+  const monday = new Date(now)
+  monday.setDate(now.getDate() + diffToMonday)
+  monday.setHours(0, 0, 0, 0)
+  const sunday = new Date(monday)
+  sunday.setDate(monday.getDate() + 6)
+  sunday.setHours(23, 59, 59, 999)
+  return { monday, sunday }
+}
+
 function formatDate(d) {
   return new Date(d).toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' })
 }
@@ -11,8 +29,7 @@ function formatDateShort(d) {
 
 function getDayLabel(dateStr) {
   const days = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']
-  const d = new Date(dateStr + 'T12:00:00')
-  return days[d.getDay()]
+  return days[new Date(dateStr + 'T12:00:00').getDay()]
 }
 
 const EMOJI_OPTIONS = ['🏠','🍳','🧹','💪','📚','🐾','🛍️','❤️','⭐','🌟','🎵','🎨','🧘','🏃','🌱','💊','🛁','🧺','🍽️','🐶']
@@ -31,6 +48,7 @@ export default function AdminView({ onExit }) {
   const [payingId, setPayingId] = useState(null)
   const [deletingEntryId, setDeletingEntryId] = useState(null)
   const [showAllEntries, setShowAllEntries] = useState(false)
+  const [addingKitchenDay, setAddingKitchenDay] = useState(false)
 
   useEffect(() => { loadAll() }, [])
 
@@ -47,12 +65,39 @@ export default function AdminView({ onExit }) {
     setLoading(false)
   }
 
+  // Stats globales
   const totalEarned = allEntries.reduce((s, e) => s + (e.reward || 0), 0)
   const topActivity = allEntries.reduce((acc, e) => {
     acc[e.activity_name] = (acc[e.activity_name] || 0) + 1
     return acc
   }, {})
   const topName = Object.entries(topActivity).sort((a, b) => b[1] - a[1])[0]
+
+  // Bono cocina semana actual
+  const { monday, sunday } = getWeekBounds()
+  const weekKitchenEntries = allEntries.filter(e => {
+    const d = new Date(e.logged_at)
+    return d >= monday && d <= sunday && e.activity_name === KITCHEN_NAME && e.reward === 0
+  })
+  const weekKitchenDays    = weekKitchenEntries.length
+  const weekKitchenClaimed = allEntries.some(e => {
+    const d = new Date(e.logged_at)
+    return d >= monday && d <= sunday && e.activity_name === KITCHEN_NAME && e.reward === KITCHEN_BONUS
+  })
+
+  // Añadir día de cocina manualmente (sin restricción de 1/día)
+  async function addKitchenDayManual() {
+    setAddingKitchenDay(true)
+    await supabase.from('entries').insert({
+      activity_id:    null,
+      activity_name:  KITCHEN_NAME,
+      activity_emoji: KITCHEN_EMOJI,
+      reward:         0,
+      logged_at:      new Date().toISOString(),
+    })
+    await loadAll()
+    setAddingKitchenDay(false)
+  }
 
   async function markPaid(week) {
     setPayingId(week.id)
@@ -65,10 +110,10 @@ export default function AdminView({ onExit }) {
     if (!form.name.trim() || !form.reward) return
     setSaving(true)
     const data = {
-      name: form.name.trim(),
-      emoji: form.emoji,
+      name:   form.name.trim(),
+      emoji:  form.emoji,
       reward: parseFloat(form.reward),
-      note: form.note.trim() || null,
+      note:   form.note.trim() || null,
       active: true,
     }
     if (editingId) {
@@ -116,7 +161,7 @@ export default function AdminView({ onExit }) {
 
   function getWeekTotal(weekStart) {
     const start = new Date(weekStart + 'T00:00:00')
-    const end = new Date(start)
+    const end   = new Date(start)
     end.setDate(start.getDate() + 6)
     end.setHours(23, 59, 59)
     return allEntries
@@ -145,8 +190,8 @@ export default function AdminView({ onExit }) {
 
         <div className="flex gap-1 mt-3 bg-[#F0FDFA] rounded-xl p-1">
           {[
-            { id: 'stats', label: 'Stats' },
-            { id: 'weeks', label: 'Semanas' },
+            { id: 'stats',      label: 'Stats' },
+            { id: 'weeks',      label: 'Semanas' },
             { id: 'activities', label: 'Actividades' },
           ].map(t => (
             <button
@@ -174,9 +219,9 @@ export default function AdminView({ onExit }) {
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-3">
                   <StatCard emoji="💰" label="Total ganado" value={`${totalEarned.toFixed(2)}€`} />
-                  <StatCard emoji="📋" label="Registros" value={allEntries.length} />
-                  <StatCard emoji="📅" label="Semanas" value={weeks.length} />
-                  <StatCard emoji="✅" label="Actividades activas" value={activities.filter(a => a.active).length} />
+                  <StatCard emoji="📋" label="Registros"    value={allEntries.length} />
+                  <StatCard emoji="📅" label="Semanas"      value={weeks.length} />
+                  <StatCard emoji="✅" label="Activas"      value={activities.filter(a => a.active).length} />
                 </div>
 
                 {topName && (
@@ -187,20 +232,52 @@ export default function AdminView({ onExit }) {
                   </div>
                 )}
 
-                {/* Historial de entradas con opción de eliminar */}
+                {/* Bono cocina esta semana — control manual */}
+                <div className="bg-white rounded-2xl p-4 border border-[#E2E8F0]">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">{KITCHEN_EMOJI}</span>
+                      <div>
+                        <p className="text-sm font-semibold text-gray-800">Cocina esta semana</p>
+                        <p className="text-xs text-gray-400">
+                          {weekKitchenDays} / {KITCHEN_GOAL} días
+                          {weekKitchenClaimed ? ' · ✅ Bono cobrado' : ''}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="h-1.5 bg-tikky-lavender rounded-full overflow-hidden mb-3">
+                    <div
+                      className="h-full bg-tikky-pink rounded-full transition-all duration-500"
+                      style={{ width: `${Math.min((weekKitchenDays / KITCHEN_GOAL) * 100, 100)}%` }}
+                    />
+                  </div>
+                  {!weekKitchenClaimed && (
+                    <button
+                      onClick={addKitchenDayManual}
+                      disabled={addingKitchenDay || weekKitchenDays >= KITCHEN_GOAL}
+                      className={`w-full py-2.5 rounded-xl text-sm font-medium transition-colors ${
+                        weekKitchenDays >= KITCHEN_GOAL
+                          ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                          : 'bg-[#F0FDFA] border border-tikky-lavender text-tikky-pink active:bg-tikky-lavender'
+                      }`}
+                    >
+                      {addingKitchenDay ? '⏳ Añadiendo...' : '+ Añadir día cocina'}
+                    </button>
+                  )}
+                </div>
+
+                {/* Historial completo */}
                 <div className="bg-white rounded-2xl p-4 border border-[#E2E8F0]">
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Historial</h3>
-                    <button
-                      onClick={() => setShowAllEntries(v => !v)}
-                      className="text-xs text-tikky-pink font-medium"
-                    >
+                    <button onClick={() => setShowAllEntries(v => !v)} className="text-xs text-tikky-pink font-medium">
                       {showAllEntries ? 'Ocultar' : `Ver todo (${allEntries.length})`}
                     </button>
                   </div>
                   <div className="space-y-2">
                     {visibleEntries.map((e, i) => {
-                      const date = new Date(e.logged_at)
+                      const date    = new Date(e.logged_at)
                       const dateKey = formatDateShort(date)
                       return (
                         <div key={e.id || i} className="flex items-center gap-2">
@@ -211,7 +288,9 @@ export default function AdminView({ onExit }) {
                               {getDayLabel(dateKey)} {date.toLocaleDateString('es', { day: '2-digit', month: 'short' })} · {date.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}
                             </p>
                           </div>
-                          <span className="text-tikky-pink font-semibold text-sm">+{e.reward}€</span>
+                          <span className="text-tikky-pink font-semibold text-sm">
+                            {e.reward > 0 ? `+${e.reward}€` : <span className="text-gray-300">—</span>}
+                          </span>
                           <button
                             onClick={() => deleteEntry(e.id)}
                             disabled={deletingEntryId === e.id}

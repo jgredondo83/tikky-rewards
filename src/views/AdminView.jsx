@@ -6,21 +6,26 @@ const KITCHEN_EMOJI = '🍳'
 const KITCHEN_GOAL  = 5
 const KITCHEN_BONUS = 50
 
+// Lunes de la semana de una fecha, como YYYY-MM-DD
+function getWeekStartStr(date) {
+  const d = new Date(date)
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day
+  d.setDate(d.getDate() + diff)
+  d.setHours(0, 0, 0, 0)
+  return d.toISOString().split('T')[0]
+}
+
 function getWeekBounds() {
-  const now = new Date()
-  const day = now.getDay()
-  const diffToMonday = (day === 0 ? -6 : 1 - day)
-  const monday = new Date(now)
-  monday.setDate(now.getDate() + diffToMonday)
-  monday.setHours(0, 0, 0, 0)
+  const monday = new Date(getWeekStartStr(new Date()) + 'T00:00:00')
   const sunday = new Date(monday)
   sunday.setDate(monday.getDate() + 6)
   sunday.setHours(23, 59, 59, 999)
   return { monday, sunday }
 }
 
-function formatDate(d) {
-  return new Date(d).toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' })
+function formatDateLong(str) {
+  return new Date(str + 'T12:00:00').toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
 function formatDateShort(d) {
@@ -28,8 +33,19 @@ function formatDateShort(d) {
 }
 
 function getDayLabel(dateStr) {
-  const days = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']
+  const days = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
   return days[new Date(dateStr + 'T12:00:00').getDay()]
+}
+
+// Agrupa entradas por nombre de actividad: { name, emoji, count, total }[]
+function buildBreakdown(entries) {
+  const map = {}
+  entries.forEach(e => {
+    if (!map[e.activity_name]) map[e.activity_name] = { name: e.activity_name, emoji: e.activity_emoji, count: 0, total: 0 }
+    map[e.activity_name].count++
+    map[e.activity_name].total += e.reward || 0
+  })
+  return Object.values(map).sort((a, b) => b.total - a.total)
 }
 
 const EMOJI_OPTIONS = ['🏠','🍳','🧹','💪','📚','🐾','🛍️','❤️','⭐','🌟','🎵','🎨','🧘','🏃','🌱','💊','🛁','🧺','🍽️','🐶']
@@ -38,17 +54,18 @@ const emptyForm = { name: '', emoji: '⭐', reward: '', note: '' }
 export default function AdminView({ onExit }) {
   const [tab, setTab] = useState('stats')
   const [activities, setActivities] = useState([])
-  const [weeks, setWeeks] = useState([])
+  const [paidWeeks, setPaidWeeks] = useState([])   // registros de la tabla weeks
   const [allEntries, setAllEntries] = useState([])
   const [loading, setLoading] = useState(true)
   const [form, setForm] = useState(emptyForm)
   const [editingId, setEditingId] = useState(null)
   const [saving, setSaving] = useState(false)
   const [showForm, setShowForm] = useState(false)
-  const [payingId, setPayingId] = useState(null)
   const [deletingEntryId, setDeletingEntryId] = useState(null)
   const [showAllEntries, setShowAllEntries] = useState(false)
   const [addingKitchenDay, setAddingKitchenDay] = useState(false)
+  const [expandedWeek, setExpandedWeek] = useState(null)   // week_start del desplegado
+  const [payingWeek, setPayingWeek] = useState(null)
 
   useEffect(() => { loadAll() }, [])
 
@@ -56,16 +73,16 @@ export default function AdminView({ onExit }) {
     setLoading(true)
     const [{ data: acts }, { data: wks }, { data: entries }] = await Promise.all([
       supabase.from('activities').select('*').order('name'),
-      supabase.from('weeks').select('*').order('week_start', { ascending: false }),
+      supabase.from('weeks').select('*'),
       supabase.from('entries').select('*').order('logged_at', { ascending: false }),
     ])
     setActivities(acts || [])
-    setWeeks(wks || [])
+    setPaidWeeks(wks || [])
     setAllEntries(entries || [])
     setLoading(false)
   }
 
-  // Stats globales
+  // ── Stats globales ───────────────────────────────────────────────────────
   const totalEarned = allEntries.reduce((s, e) => s + (e.reward || 0), 0)
   const topActivity = allEntries.reduce((acc, e) => {
     acc[e.activity_name] = (acc[e.activity_name] || 0) + 1
@@ -73,7 +90,7 @@ export default function AdminView({ onExit }) {
   }, {})
   const topName = Object.entries(topActivity).sort((a, b) => b[1] - a[1])[0]
 
-  // Bono cocina semana actual
+  // ── Bono cocina semana actual ────────────────────────────────────────────
   const { monday, sunday } = getWeekBounds()
   const weekKitchenEntries = allEntries.filter(e => {
     const d = new Date(e.logged_at)
@@ -85,45 +102,54 @@ export default function AdminView({ onExit }) {
     return d >= monday && d <= sunday && e.activity_name === KITCHEN_NAME && e.reward === KITCHEN_BONUS
   })
 
-  // Añadir día de cocina manualmente (sin restricción de 1/día)
   async function addKitchenDayManual() {
     setAddingKitchenDay(true)
     await supabase.from('entries').insert({
-      activity_id:    null,
-      activity_name:  KITCHEN_NAME,
-      activity_emoji: KITCHEN_EMOJI,
-      reward:         0,
-      logged_at:      new Date().toISOString(),
+      activity_id: null, activity_name: KITCHEN_NAME,
+      activity_emoji: KITCHEN_EMOJI, reward: 0,
+      logged_at: new Date().toISOString(),
     })
     await loadAll()
     setAddingKitchenDay(false)
   }
 
-  async function markPaid(week) {
-    setPayingId(week.id)
-    await supabase.from('weeks').update({ paid: true, paid_at: new Date().toISOString() }).eq('id', week.id)
+  // ── Semanas agrupadas desde entries ─────────────────────────────────────
+  // Cada entrada → su lunes de semana; agrupar por ese lunes
+  const weekGroupsMap = {}
+  allEntries.forEach(e => {
+    const ws = getWeekStartStr(new Date(e.logged_at))
+    if (!weekGroupsMap[ws]) weekGroupsMap[ws] = []
+    weekGroupsMap[ws].push(e)
+  })
+  // Ordenar semanas de más reciente a más antigua
+  const sortedWeekStarts = Object.keys(weekGroupsMap).sort().reverse()
+
+  // Lookup de semanas pagadas por week_start
+  const paidMap = {}
+  paidWeeks.forEach(w => { paidMap[w.week_start] = w })
+
+  async function markPaid(weekStart) {
+    setPayingWeek(weekStart)
+    // Upsert: crea si no existe, actualiza si existe
+    await supabase.from('weeks').upsert(
+      { week_start: weekStart, paid: true, paid_at: new Date().toISOString() },
+      { onConflict: 'week_start' }
+    )
     await loadAll()
-    setPayingId(null)
+    setPayingWeek(null)
   }
 
+  // ── CRUD actividades ─────────────────────────────────────────────────────
   async function saveActivity() {
     if (!form.name.trim() || !form.reward) return
     setSaving(true)
     const data = {
-      name:   form.name.trim(),
-      emoji:  form.emoji,
-      reward: parseFloat(form.reward),
-      note:   form.note.trim() || null,
-      active: true,
+      name: form.name.trim(), emoji: form.emoji,
+      reward: parseFloat(form.reward), note: form.note.trim() || null, active: true,
     }
-    if (editingId) {
-      await supabase.from('activities').update(data).eq('id', editingId)
-    } else {
-      await supabase.from('activities').insert(data)
-    }
-    setForm(emptyForm)
-    setEditingId(null)
-    setShowForm(false)
+    if (editingId) await supabase.from('activities').update(data).eq('id', editingId)
+    else await supabase.from('activities').insert(data)
+    setForm(emptyForm); setEditingId(null); setShowForm(false)
     await loadAll()
     setSaving(false)
   }
@@ -154,19 +180,7 @@ export default function AdminView({ onExit }) {
   }
 
   function cancelForm() {
-    setForm(emptyForm)
-    setEditingId(null)
-    setShowForm(false)
-  }
-
-  function getWeekTotal(weekStart) {
-    const start = new Date(weekStart + 'T00:00:00')
-    const end   = new Date(start)
-    end.setDate(start.getDate() + 6)
-    end.setHours(23, 59, 59)
-    return allEntries
-      .filter(e => { const d = new Date(e.logged_at); return d >= start && d <= end })
-      .reduce((s, e) => s + (e.reward || 0), 0)
+    setForm(emptyForm); setEditingId(null); setShowForm(false)
   }
 
   const visibleEntries = showAllEntries ? allEntries : allEntries.slice(0, 10)
@@ -180,14 +194,10 @@ export default function AdminView({ onExit }) {
             <h1 className="text-lg font-bold text-gray-900">Admin</h1>
             <p className="text-xs text-gray-400">Panel de control</p>
           </div>
-          <button
-            onClick={onExit}
-            className="text-sm text-gray-500 bg-[#F0FDFA] rounded-full px-3 py-1 active:bg-tikky-lavender"
-          >
+          <button onClick={onExit} className="text-sm text-gray-500 bg-[#F0FDFA] rounded-full px-3 py-1 active:bg-tikky-lavender">
             ← Salir
           </button>
         </div>
-
         <div className="flex gap-1 mt-3 bg-[#F0FDFA] rounded-xl p-1">
           {[
             { id: 'stats',      label: 'Stats' },
@@ -214,14 +224,14 @@ export default function AdminView({ onExit }) {
           </div>
         ) : (
           <>
-            {/* STATS */}
+            {/* ── STATS ── */}
             {tab === 'stats' && (
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-3">
-                  <StatCard emoji="💰" label="Total ganado" value={`${totalEarned.toFixed(2)}€`} />
-                  <StatCard emoji="📋" label="Registros"    value={allEntries.length} />
-                  <StatCard emoji="📅" label="Semanas"      value={weeks.length} />
-                  <StatCard emoji="✅" label="Activas"      value={activities.filter(a => a.active).length} />
+                  <StatCard emoji="💰" label="Total ganado"  value={`${totalEarned.toFixed(2)}€`} />
+                  <StatCard emoji="📋" label="Registros"     value={allEntries.length} />
+                  <StatCard emoji="📅" label="Semanas"       value={sortedWeekStarts.length} />
+                  <StatCard emoji="✅" label="Activas"       value={activities.filter(a => a.active).length} />
                 </div>
 
                 {topName && (
@@ -232,7 +242,7 @@ export default function AdminView({ onExit }) {
                   </div>
                 )}
 
-                {/* Bono cocina esta semana — control manual */}
+                {/* Bono cocina esta semana */}
                 <div className="bg-white rounded-2xl p-4 border border-[#E2E8F0]">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
@@ -240,8 +250,7 @@ export default function AdminView({ onExit }) {
                       <div>
                         <p className="text-sm font-semibold text-gray-800">Cocina esta semana</p>
                         <p className="text-xs text-gray-400">
-                          {weekKitchenDays} / {KITCHEN_GOAL} días
-                          {weekKitchenClaimed ? ' · ✅ Bono cobrado' : ''}
+                          {weekKitchenDays} / {KITCHEN_GOAL} días{weekKitchenClaimed ? ' · ✅ Bono cobrado' : ''}
                         </p>
                       </div>
                     </div>
@@ -309,60 +318,110 @@ export default function AdminView({ onExit }) {
               </div>
             )}
 
-            {/* SEMANAS */}
+            {/* ── SEMANAS ── */}
             {tab === 'weeks' && (
-              <div className="space-y-2">
-                {weeks.length === 0 && (
-                  <p className="text-sm text-gray-400 text-center py-8">No hay semanas registradas</p>
+              <div className="space-y-3">
+                {sortedWeekStarts.length === 0 && (
+                  <p className="text-sm text-gray-400 text-center py-8">No hay entradas registradas</p>
                 )}
-                {weeks.map(w => {
-                  const total = getWeekTotal(w.week_start)
+                {sortedWeekStarts.map(ws => {
+                  const entries     = weekGroupsMap[ws]
+                  const weekTotal   = entries.reduce((s, e) => s + (e.reward || 0), 0)
+                  const paid        = paidMap[ws]?.paid === true
+                  const paidAt      = paidMap[ws]?.paid_at
+                  const breakdown   = buildBreakdown(entries)
+                  const isExpanded  = expandedWeek === ws
+                  const isCurrentWk = ws === getWeekStartStr(new Date())
+
+                  // Fecha fin de semana (domingo)
+                  const wkSunday = new Date(ws + 'T00:00:00')
+                  wkSunday.setDate(wkSunday.getDate() + 6)
+                  const wkSundayStr = formatDateShort(wkSunday)
+
                   return (
-                    <div key={w.id} className="bg-white rounded-2xl p-4 border border-[#E2E8F0]">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="font-medium text-gray-800 text-sm">Sem. {formatDate(w.week_start)}</p>
-                          <p className="text-tikky-pink font-bold">{total.toFixed(2)}€</p>
-                          {w.paid && (
-                            <p className="text-xs text-tikky-pink mt-0.5">
-                              ✅ Pagado {w.paid_at ? formatDate(w.paid_at) : ''}
+                    <div key={ws} className="bg-white rounded-2xl border border-[#E2E8F0] overflow-hidden">
+                      {/* Cabecera de la semana */}
+                      <button
+                        className="w-full px-4 py-3 flex items-center gap-3 text-left active:bg-[#F0FDFA]"
+                        onClick={() => setExpandedWeek(isExpanded ? null : ws)}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-semibold text-gray-800">
+                              {formatDateLong(ws)}
+                              {isCurrentWk && (
+                                <span className="ml-2 text-[10px] bg-tikky-lavender text-tikky-pink rounded-full px-2 py-0.5 font-medium">
+                                  actual
+                                </span>
+                              )}
                             </p>
+                          </div>
+                          <p className="text-xs text-gray-400">{ws} → {wkSundayStr}</p>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <p className="text-tikky-pink font-bold text-sm">{weekTotal.toFixed(2)}€</p>
+                          <p className="text-xs text-gray-400">{entries.length} registro{entries.length !== 1 ? 's' : ''}</p>
+                        </div>
+                        <span className="text-gray-300 text-xs ml-1">{isExpanded ? '▲' : '▼'}</span>
+                      </button>
+
+                      {/* Desglose + acción pago */}
+                      {isExpanded && (
+                        <div className="border-t border-[#E2E8F0] px-4 py-3 space-y-3">
+                          {/* Desglose por actividad */}
+                          <div className="space-y-1.5">
+                            {breakdown.map(b => (
+                              <div key={b.name} className="flex items-center gap-2">
+                                <span className="text-sm">{b.emoji}</span>
+                                <span className="flex-1 text-xs text-gray-600 truncate">{b.name}</span>
+                                <span className="text-xs text-gray-400">×{b.count}</span>
+                                {b.total > 0
+                                  ? <span className="text-xs font-semibold text-tikky-pink">{b.total.toFixed(2)}€</span>
+                                  : <span className="text-xs text-gray-300">—</span>
+                                }
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Estado de pago */}
+                          {paid ? (
+                            <div className="flex items-center justify-between bg-[#F0FDFA] rounded-xl px-3 py-2">
+                              <span className="text-xs text-tikky-pink font-medium">✅ Pagado</span>
+                              {paidAt && (
+                                <span className="text-xs text-gray-400">
+                                  {new Date(paidAt).toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' })}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => markPaid(ws)}
+                              disabled={payingWeek === ws}
+                              className="w-full bg-tikky-pink text-white text-sm font-semibold py-2.5 rounded-xl active:opacity-80"
+                            >
+                              {payingWeek === ws ? '⏳ Guardando...' : `Marcar como pagada — ${weekTotal.toFixed(2)}€`}
+                            </button>
                           )}
                         </div>
-                        {!w.paid && (
-                          <button
-                            onClick={() => markPaid(w)}
-                            disabled={payingId === w.id}
-                            className="bg-tikky-pink text-white text-xs font-medium px-3 py-1.5 rounded-full active:opacity-80"
-                          >
-                            {payingId === w.id ? '...' : 'Marcar pagado'}
-                          </button>
-                        )}
-                      </div>
+                      )}
                     </div>
                   )
                 })}
               </div>
             )}
 
-            {/* ACTIVIDADES */}
+            {/* ── ACTIVIDADES ── */}
             {tab === 'activities' && (
               <div className="space-y-3">
                 {!showForm && (
-                  <button
-                    onClick={() => setShowForm(true)}
-                    className="w-full bg-tikky-pink text-white font-semibold py-3 rounded-2xl active:opacity-80"
-                  >
+                  <button onClick={() => setShowForm(true)} className="w-full bg-tikky-pink text-white font-semibold py-3 rounded-2xl active:opacity-80">
                     + Nueva actividad
                   </button>
                 )}
 
                 {showForm && (
                   <div className="bg-white rounded-2xl p-4 border border-[#E2E8F0] space-y-3">
-                    <h3 className="font-semibold text-gray-800">
-                      {editingId ? 'Editar actividad' : 'Nueva actividad'}
-                    </h3>
-
+                    <h3 className="font-semibold text-gray-800">{editingId ? 'Editar actividad' : 'Nueva actividad'}</h3>
                     <div>
                       <p className="text-xs text-gray-500 mb-1">Emoji</p>
                       <div className="flex flex-wrap gap-2">
@@ -379,7 +438,6 @@ export default function AdminView({ onExit }) {
                         ))}
                       </div>
                     </div>
-
                     <div>
                       <p className="text-xs text-gray-500 mb-1">Nombre</p>
                       <input
@@ -393,10 +451,7 @@ export default function AdminView({ onExit }) {
                       <p className="text-xs text-gray-500 mb-1">Recompensa (€)</p>
                       <input
                         className="w-full border border-[#E2E8F0] rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-tikky-pink"
-                        placeholder="Ej: 5"
-                        type="number"
-                        step="0.5"
-                        min="0"
+                        placeholder="Ej: 5" type="number" step="0.5" min="0"
                         value={form.reward}
                         onChange={e => setForm(f => ({ ...f, reward: e.target.value }))}
                       />
@@ -410,11 +465,8 @@ export default function AdminView({ onExit }) {
                         onChange={e => setForm(f => ({ ...f, note: e.target.value }))}
                       />
                     </div>
-
                     <div className="flex gap-2">
-                      <button onClick={cancelForm} className="flex-1 border border-[#E2E8F0] text-gray-600 py-2 rounded-xl text-sm">
-                        Cancelar
-                      </button>
+                      <button onClick={cancelForm} className="flex-1 border border-[#E2E8F0] text-gray-600 py-2 rounded-xl text-sm">Cancelar</button>
                       <button
                         onClick={saveActivity}
                         disabled={saving}
@@ -428,10 +480,7 @@ export default function AdminView({ onExit }) {
 
                 <div className="space-y-2">
                   {activities.map(act => (
-                    <div
-                      key={act.id}
-                      className={`bg-white rounded-2xl px-4 py-3 border border-[#E2E8F0] ${!act.active ? 'opacity-50' : ''}`}
-                    >
+                    <div key={act.id} className={`bg-white rounded-2xl px-4 py-3 border border-[#E2E8F0] ${!act.active ? 'opacity-50' : ''}`}>
                       <div className="flex items-center gap-3">
                         <span className="text-2xl">{act.emoji}</span>
                         <div className="flex-1 min-w-0">
@@ -440,26 +489,14 @@ export default function AdminView({ onExit }) {
                           {act.note && <p className="text-xs text-gray-400 truncate">{act.note}</p>}
                         </div>
                         <div className="flex gap-1">
-                          <button
-                            onClick={() => startEdit(act)}
-                            className="w-8 h-8 rounded-lg bg-[#F0FDFA] flex items-center justify-center text-sm active:bg-tikky-lavender"
-                          >
-                            ✏️
-                          </button>
+                          <button onClick={() => startEdit(act)} className="w-8 h-8 rounded-lg bg-[#F0FDFA] flex items-center justify-center text-sm active:bg-tikky-lavender">✏️</button>
                           <button
                             onClick={() => toggleActive(act)}
-                            className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm active:opacity-70 ${
-                              act.active ? 'bg-tikky-soft' : 'bg-[#F8FAFC]'
-                            }`}
+                            className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm active:opacity-70 ${act.active ? 'bg-tikky-soft' : 'bg-[#F8FAFC]'}`}
                           >
                             {act.active ? '✅' : '⬜'}
                           </button>
-                          <button
-                            onClick={() => deleteActivity(act.id)}
-                            className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center text-sm active:bg-red-100"
-                          >
-                            🗑️
-                          </button>
+                          <button onClick={() => deleteActivity(act.id)} className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center text-sm active:bg-red-100">🗑️</button>
                         </div>
                       </div>
                     </div>

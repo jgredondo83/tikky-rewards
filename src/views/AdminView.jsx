@@ -37,13 +37,16 @@ function getDayLabel(dateStr) {
   return days[new Date(dateStr + 'T12:00:00').getDay()]
 }
 
-// Agrupa entradas por nombre de actividad: { name, emoji, count, total }[]
+// Agrupa entradas por nombre de actividad con montos pagado/pendiente
 function buildBreakdown(entries) {
   const map = {}
   entries.forEach(e => {
-    if (!map[e.activity_name]) map[e.activity_name] = { name: e.activity_name, emoji: e.activity_emoji, count: 0, total: 0 }
+    if (!map[e.activity_name]) map[e.activity_name] = { name: e.activity_name, emoji: e.activity_emoji, count: 0, total: 0, paid: 0, pending: 0 }
     map[e.activity_name].count++
-    map[e.activity_name].total += e.reward || 0
+    const reward = e.reward || 0
+    map[e.activity_name].total += reward
+    if (e.paid) map[e.activity_name].paid += reward
+    else map[e.activity_name].pending += reward
   })
   return Object.values(map).sort((a, b) => b.total - a.total)
 }
@@ -54,7 +57,6 @@ const emptyForm = { name: '', emoji: '⭐', reward: '', note: '' }
 export default function AdminView({ onExit }) {
   const [tab, setTab] = useState('stats')
   const [activities, setActivities] = useState([])
-  const [paidWeeks, setPaidWeeks] = useState([])   // registros de la tabla weeks
   const [allEntries, setAllEntries] = useState([])
   const [loading, setLoading] = useState(true)
   const [form, setForm] = useState(emptyForm)
@@ -64,26 +66,25 @@ export default function AdminView({ onExit }) {
   const [deletingEntryId, setDeletingEntryId] = useState(null)
   const [showAllEntries, setShowAllEntries] = useState(false)
   const [addingKitchenDay, setAddingKitchenDay] = useState(false)
-  const [expandedWeek, setExpandedWeek] = useState(null)   // week_start del desplegado
+  const [expandedWeek, setExpandedWeek] = useState(null)
   const [payingWeek, setPayingWeek] = useState(null)
 
   useEffect(() => { loadAll() }, [])
 
   async function loadAll() {
     setLoading(true)
-    const [{ data: acts }, { data: wks }, { data: entries }] = await Promise.all([
+    const [{ data: acts }, { data: entries }] = await Promise.all([
       supabase.from('activities').select('*').order('name'),
-      supabase.from('weeks').select('*'),
       supabase.from('entries').select('*').order('logged_at', { ascending: false }),
     ])
     setActivities(acts || [])
-    setPaidWeeks(wks || [])
     setAllEntries(entries || [])
     setLoading(false)
   }
 
   // ── Stats globales ───────────────────────────────────────────────────────
-  const totalEarned = allEntries.reduce((s, e) => s + (e.reward || 0), 0)
+  const totalEarned   = allEntries.reduce((s, e) => s + (e.reward || 0), 0)
+  const totalPending  = allEntries.filter(e => !e.paid && e.reward > 0).reduce((s, e) => s + e.reward, 0)
   const topActivity = allEntries.reduce((acc, e) => {
     acc[e.activity_name] = (acc[e.activity_name] || 0) + 1
     return acc
@@ -114,27 +115,22 @@ export default function AdminView({ onExit }) {
   }
 
   // ── Semanas agrupadas desde entries ─────────────────────────────────────
-  // Cada entrada → su lunes de semana; agrupar por ese lunes
   const weekGroupsMap = {}
   allEntries.forEach(e => {
     const ws = getWeekStartStr(new Date(e.logged_at))
     if (!weekGroupsMap[ws]) weekGroupsMap[ws] = []
     weekGroupsMap[ws].push(e)
   })
-  // Ordenar semanas de más reciente a más antigua
   const sortedWeekStarts = Object.keys(weekGroupsMap).sort().reverse()
 
-  // Lookup de semanas pagadas por week_start
-  const paidMap = {}
-  paidWeeks.forEach(w => { paidMap[w.week_start] = w })
-
-  async function markPaid(weekStart) {
+  // Marca como pagadas todas las entradas pendientes de una semana
+  async function markWeekPaid(weekStart) {
+    const unpaidIds = weekGroupsMap[weekStart]
+      .filter(e => !e.paid && e.reward > 0)
+      .map(e => e.id)
+    if (unpaidIds.length === 0) return
     setPayingWeek(weekStart)
-    // Upsert: crea si no existe, actualiza si existe
-    await supabase.from('weeks').upsert(
-      { week_start: weekStart, paid: true, paid_at: new Date().toISOString() },
-      { onConflict: 'week_start' }
-    )
+    await supabase.from('entries').update({ paid: true }).in('id', unpaidIds)
     await loadAll()
     setPayingWeek(null)
   }
@@ -229,8 +225,8 @@ export default function AdminView({ onExit }) {
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-3">
                   <StatCard emoji="💰" label="Total ganado"  value={`${totalEarned.toFixed(2)}€`} />
+                  <StatCard emoji="⏳" label="Por cobrar"    value={`${totalPending.toFixed(2)}€`} highlight={totalPending > 0} />
                   <StatCard emoji="📋" label="Registros"     value={allEntries.length} />
-                  <StatCard emoji="📅" label="Semanas"       value={sortedWeekStarts.length} />
                   <StatCard emoji="✅" label="Activas"       value={activities.filter(a => a.active).length} />
                 </div>
 
@@ -297,9 +293,16 @@ export default function AdminView({ onExit }) {
                               {getDayLabel(dateKey)} {date.toLocaleDateString('es', { day: '2-digit', month: 'short' })} · {date.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}
                             </p>
                           </div>
-                          <span className="text-tikky-pink font-semibold text-sm">
-                            {e.reward > 0 ? `+${e.reward}€` : <span className="text-gray-300">—</span>}
-                          </span>
+                          <div className="flex flex-col items-end gap-0.5 flex-shrink-0">
+                            <span className="text-tikky-pink font-semibold text-sm">
+                              {e.reward > 0 ? `+${e.reward}€` : <span className="text-gray-300">—</span>}
+                            </span>
+                            {e.reward > 0 && (
+                              <span className={`text-[10px] font-medium ${e.paid ? 'text-tikky-pink' : 'text-amber-500'}`}>
+                                {e.paid ? '✓ pagado' : '· pendiente'}
+                              </span>
+                            )}
+                          </div>
                           <button
                             onClick={() => deleteEntry(e.id)}
                             disabled={deletingEntryId === e.id}
@@ -325,15 +328,15 @@ export default function AdminView({ onExit }) {
                   <p className="text-sm text-gray-400 text-center py-8">No hay entradas registradas</p>
                 )}
                 {sortedWeekStarts.map(ws => {
-                  const entries     = weekGroupsMap[ws]
-                  const weekTotal   = entries.reduce((s, e) => s + (e.reward || 0), 0)
-                  const paid        = paidMap[ws]?.paid === true
-                  const paidAt      = paidMap[ws]?.paid_at
-                  const breakdown   = buildBreakdown(entries)
-                  const isExpanded  = expandedWeek === ws
-                  const isCurrentWk = ws === getWeekStartStr(new Date())
+                  const entries       = weekGroupsMap[ws]
+                  const weekTotal     = entries.reduce((s, e) => s + (e.reward || 0), 0)
+                  const weekPending   = entries.filter(e => !e.paid && e.reward > 0).reduce((s, e) => s + e.reward, 0)
+                  const weekPaid      = entries.filter(e => e.paid && e.reward > 0).reduce((s, e) => s + e.reward, 0)
+                  const allPaid       = weekPending === 0 && weekTotal > 0
+                  const breakdown     = buildBreakdown(entries)
+                  const isExpanded    = expandedWeek === ws
+                  const isCurrentWk   = ws === getWeekStartStr(new Date())
 
-                  // Fecha fin de semana (domingo)
                   const wkSunday = new Date(ws + 'T00:00:00')
                   wkSunday.setDate(wkSunday.getDate() + 6)
                   const wkSundayStr = formatDateShort(wkSunday)
@@ -360,7 +363,10 @@ export default function AdminView({ onExit }) {
                         </div>
                         <div className="text-right flex-shrink-0">
                           <p className="text-tikky-pink font-bold text-sm">{weekTotal.toFixed(2)}€</p>
-                          <p className="text-xs text-gray-400">{entries.length} registro{entries.length !== 1 ? 's' : ''}</p>
+                          {weekPending > 0
+                            ? <p className="text-[10px] text-amber-500 font-medium">{weekPending.toFixed(2)}€ pendiente</p>
+                            : <p className="text-[10px] text-tikky-pink font-medium">✓ cobrado</p>
+                          }
                         </div>
                         <span className="text-gray-300 text-xs ml-1">{isExpanded ? '▲' : '▼'}</span>
                       </button>
@@ -375,33 +381,42 @@ export default function AdminView({ onExit }) {
                                 <span className="text-sm">{b.emoji}</span>
                                 <span className="flex-1 text-xs text-gray-600 truncate">{b.name}</span>
                                 <span className="text-xs text-gray-400">×{b.count}</span>
-                                {b.total > 0
-                                  ? <span className="text-xs font-semibold text-tikky-pink">{b.total.toFixed(2)}€</span>
-                                  : <span className="text-xs text-gray-300">—</span>
-                                }
+                                {b.total > 0 ? (
+                                  <div className="text-right">
+                                    <span className="text-xs font-semibold text-tikky-pink">{b.total.toFixed(2)}€</span>
+                                    {b.pending > 0 && (
+                                      <span className="block text-[10px] text-amber-500">{b.pending.toFixed(2)}€ pdte</span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-gray-300">—</span>
+                                )}
                               </div>
                             ))}
                           </div>
 
-                          {/* Estado de pago */}
-                          {paid ? (
-                            <div className="flex items-center justify-between bg-[#F0FDFA] rounded-xl px-3 py-2">
-                              <span className="text-xs text-tikky-pink font-medium">✅ Pagado</span>
-                              {paidAt && (
-                                <span className="text-xs text-gray-400">
-                                  {new Date(paidAt).toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' })}
-                                </span>
-                              )}
+                          {/* Resumen pagado/pendiente */}
+                          {weekPaid > 0 && weekPending > 0 && (
+                            <div className="flex justify-between text-xs bg-[#F0FDFA] rounded-xl px-3 py-2">
+                              <span className="text-tikky-pink font-medium">✓ Cobrado: {weekPaid.toFixed(2)}€</span>
+                              <span className="text-amber-500 font-medium">Pendiente: {weekPending.toFixed(2)}€</span>
                             </div>
-                          ) : (
+                          )}
+
+                          {/* Estado de pago */}
+                          {allPaid ? (
+                            <div className="flex items-center justify-center bg-[#F0FDFA] rounded-xl px-3 py-2">
+                              <span className="text-xs text-tikky-pink font-medium">✅ Todo pagado — {weekPaid.toFixed(2)}€</span>
+                            </div>
+                          ) : weekPending > 0 ? (
                             <button
-                              onClick={() => markPaid(ws)}
+                              onClick={() => markWeekPaid(ws)}
                               disabled={payingWeek === ws}
                               className="w-full bg-tikky-pink text-white text-sm font-semibold py-2.5 rounded-xl active:opacity-80"
                             >
-                              {payingWeek === ws ? '⏳ Guardando...' : `Marcar como pagada — ${weekTotal.toFixed(2)}€`}
+                              {payingWeek === ws ? '⏳ Guardando...' : `Pagar todo pendiente — ${weekPending.toFixed(2)}€`}
                             </button>
-                          )}
+                          ) : null}
                         </div>
                       )}
                     </div>
@@ -511,12 +526,12 @@ export default function AdminView({ onExit }) {
   )
 }
 
-function StatCard({ emoji, label, value }) {
+function StatCard({ emoji, label, value, highlight }) {
   return (
-    <div className="bg-white rounded-2xl p-4 border border-[#E2E8F0]">
+    <div className={`bg-white rounded-2xl p-4 border ${highlight ? 'border-amber-200 bg-amber-50' : 'border-[#E2E8F0]'}`}>
       <p className="text-2xl mb-1">{emoji}</p>
       <p className="text-xs text-gray-400">{label}</p>
-      <p className="text-lg font-bold text-gray-800">{value}</p>
+      <p className={`text-lg font-bold ${highlight ? 'text-amber-600' : 'text-gray-800'}`}>{value}</p>
     </div>
   )
 }

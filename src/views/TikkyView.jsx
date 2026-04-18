@@ -6,10 +6,10 @@ const KITCHEN_EMOJI = '🍳'
 const KITCHEN_GOAL  = 5
 const KITCHEN_BONUS = 50
 
-// Devuelve el lunes de la semana de una fecha (como string YYYY-MM-DD)
+// Lunes de la semana de una fecha → YYYY-MM-DD
 function getWeekStartStr(date) {
   const d = new Date(date)
-  const day = d.getDay() // 0=Dom, 1=Lun...
+  const day = d.getDay()
   const diff = day === 0 ? -6 : 1 - day
   d.setDate(d.getDate() + diff)
   d.setHours(0, 0, 0, 0)
@@ -25,13 +25,25 @@ function getWeekBounds() {
 }
 
 function formatDateISO(d) {
-  return d instanceof Date ? d.toISOString().split('T')[0] : new Date(d).toISOString().split('T')[0]
+  return (d instanceof Date ? d : new Date(d)).toISOString().split('T')[0]
 }
 
-// Etiqueta del día a partir de YYYY-MM-DD (sin ajuste de hora)
 function getDayLabel(dateStr) {
   const days = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
   return days[new Date(dateStr + 'T12:00:00').getDay()]
+}
+
+// "Sáb 18 abr · 13:27"
+function formatTimestamp(dateStr) {
+  const date = new Date(dateStr)
+  const days   = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']
+  const months = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+  const day  = days[date.getDay()]
+  const num  = String(date.getDate()).padStart(2, '0')
+  const mon  = months[date.getMonth()]
+  const h    = String(date.getHours()).padStart(2, '0')
+  const m    = String(date.getMinutes()).padStart(2, '0')
+  return `${day} ${num} ${mon} · ${h}:${m}`
 }
 
 const MOTIVATIONAL = [
@@ -42,34 +54,9 @@ const MOTIVATIONAL = [
   { min: 150, max: 999, msg: '¡Semana épica, eres la mejor! 🏆' },
 ]
 
-const BADGES = [
-  { id: 'first',   emoji: '🌱', label: 'Primera actividad',         check: (e) => e.length >= 1 },
-  { id: 'five',    emoji: '⭐', label: '5 actividades',             check: (e) => e.length >= 5 },
-  { id: 'ten',     emoji: '🔟', label: '10 actividades',            check: (e) => e.length >= 10 },
-  { id: 'fifty',   emoji: '💰', label: '50€ en la semana',          check: (_, t) => t >= 50 },
-  { id: 'hundred', emoji: '💎', label: '100€ histórico',            check: (_, __, tot) => tot >= 100 },
-  { id: 'streak3', emoji: '🔥', label: '3 días seguidos',           check: (e) => checkStreak(e, 3) },
-  { id: 'kitchen', emoji: '🍳', label: 'Bono cocina cobrado',       check: (e) => e.some(x => x.activity_name === KITCHEN_NAME && x.reward === KITCHEN_BONUS) },
-  { id: 'morning', emoji: '🌅', label: 'Actividad antes de las 9h', check: (e) => e.some(x => new Date(x.logged_at).getHours() < 9) },
-  { id: 'weekend', emoji: '🎉', label: 'Activa el fin de semana',   check: (e) => e.some(x => { const d = new Date(x.logged_at).getDay(); return d === 0 || d === 6 }) },
-]
-
-function checkStreak(entries, n) {
-  const days = [...new Set(entries.map(e => formatDateISO(new Date(e.logged_at))))].sort()
-  if (days.length < n) return false
-  let streak = 1
-  for (let i = 1; i < days.length; i++) {
-    const diff = (new Date(days[i]) - new Date(days[i - 1])) / 86400000
-    streak = diff === 1 ? streak + 1 : 1
-    if (streak >= n) return true
-  }
-  return false
-}
-
 // ── Notificaciones ──────────────────────────────────────────────────────────
 function msUntilHour(h) {
-  const now = new Date()
-  const target = new Date()
+  const now = new Date(), target = new Date()
   target.setHours(h, 0, 0, 0)
   if (target <= now) target.setDate(target.getDate() + 1)
   return target - now
@@ -86,19 +73,18 @@ export default function TikkyView({ onAdminPress }) {
   const [activities, setActivities] = useState([])
   const [weekEntries, setWeekEntries] = useState([])
   const [allEntries, setAllEntries] = useState([])
-  const [paidWeeks, setPaidWeeks] = useState([])        // semanas marcadas como pagadas
   const [loading, setLoading] = useState(true)
   const [logging, setLogging] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
   const [showHistory, setShowHistory] = useState(false)
   const [dupModal, setDupModal] = useState(null)
+  const [bonusToast, setBonusToast] = useState(false)
 
   // Bono cocina
   const [kitchenDays, setKitchenDays] = useState(0)
   const [kitchenClaimed, setKitchenClaimed] = useState(false)
   const [kitchenToday, setKitchenToday] = useState(false)
   const [kitchenLoading, setKitchenLoading] = useState(false)
-  const [claimLoading, setClaimLoading] = useState(false)
 
   // Notificaciones
   const notifScheduled = useRef(false)
@@ -108,11 +94,16 @@ export default function TikkyView({ onAdminPress }) {
 
   const { monday, sunday } = getWeekBounds()
 
+  // Auto-ocultar toast tras 4 s
+  useEffect(() => {
+    if (!bonusToast) return
+    const t = setTimeout(() => setBonusToast(false), 4000)
+    return () => clearTimeout(t)
+  }, [bonusToast])
+
   useEffect(() => {
     loadAll()
-    if ('Notification' in window && Notification.permission === 'granted') {
-      scheduleNotifications()
-    }
+    if ('Notification' in window && Notification.permission === 'granted') scheduleNotifications()
   }, [])
 
   function scheduleNotifications() {
@@ -137,7 +128,7 @@ export default function TikkyView({ onAdminPress }) {
 
   async function loadAll() {
     setLoading(true)
-    const [{ data: acts }, { data: weekE }, { data: allE }, { data: wks }] = await Promise.all([
+    const [{ data: acts }, { data: weekE }, { data: allE }] = await Promise.all([
       supabase.from('activities').select('*').eq('active', true).order('name'),
       supabase.from('entries')
         .select('*')
@@ -145,19 +136,31 @@ export default function TikkyView({ onAdminPress }) {
         .lte('logged_at', sunday.toISOString())
         .order('logged_at', { ascending: false }),
       supabase.from('entries').select('*').order('logged_at', { ascending: false }),
-      supabase.from('weeks').select('*'),
     ])
 
-    const weekData = weekE || []
-    const allData  = allE  || []
-    const wksData  = wks   || []
+    let weekData = weekE || []
+    let allData  = allE  || []
+
+    // ── Auto-bono: si se alcanzan 5 días y no se ha cobrado, insertar automáticamente ──
+    const kitchenDayCount  = weekData.filter(e => e.activity_name === KITCHEN_NAME && e.reward === 0).length
+    const alreadyClaimed   = weekData.some(e => e.activity_name === KITCHEN_NAME && e.reward === KITCHEN_BONUS)
+    if (kitchenDayCount >= KITCHEN_GOAL && !alreadyClaimed) {
+      const { data: bonusRow } = await supabase.from('entries').insert({
+        activity_id: null, activity_name: KITCHEN_NAME,
+        activity_emoji: KITCHEN_EMOJI, reward: KITCHEN_BONUS,
+        logged_at: new Date().toISOString(),
+      }).select().single()
+      if (bonusRow) {
+        weekData = [bonusRow, ...weekData]
+        allData  = [bonusRow, ...allData]
+      }
+      setBonusToast(true)
+    }
 
     setActivities(acts || [])
     setWeekEntries(weekData)
     setAllEntries(allData)
-    setPaidWeeks(wksData)
 
-    // Estado del bono cocina para la semana actual
     const kitchenDayEntries = weekData.filter(e => e.activity_name === KITCHEN_NAME && e.reward === 0)
     const claimed     = weekData.some(e => e.activity_name === KITCHEN_NAME && e.reward === KITCHEN_BONUS)
     const todayStr    = formatDateISO(new Date())
@@ -169,7 +172,7 @@ export default function TikkyView({ onAdminPress }) {
     setLoading(false)
   }
 
-  // ── Bono cocina ──────────────────────────────────────────────────────────
+  // Registrar un día de cocina (reward=0) — sin botón de cobro, el bono es automático
   async function logKitchenDay() {
     if (kitchenLoading || kitchenToday || kitchenDays >= KITCHEN_GOAL || kitchenClaimed) return
     setKitchenLoading(true)
@@ -182,19 +185,6 @@ export default function TikkyView({ onAdminPress }) {
     setKitchenLoading(false)
   }
 
-  async function claimKitchenBonus() {
-    if (claimLoading || kitchenClaimed || kitchenDays < KITCHEN_GOAL) return
-    setClaimLoading(true)
-    await supabase.from('entries').insert({
-      activity_id: null, activity_name: KITCHEN_NAME,
-      activity_emoji: KITCHEN_EMOJI, reward: KITCHEN_BONUS,
-      logged_at: new Date().toISOString(),
-    })
-    await loadAll()
-    setClaimLoading(false)
-  }
-
-  // ── Actividades normales ─────────────────────────────────────────────────
   async function doLog(activity) {
     setLogging(activity.id)
     await supabase.from('entries').insert({
@@ -218,8 +208,7 @@ export default function TikkyView({ onAdminPress }) {
   }
 
   async function confirmDup() {
-    const act = dupModal
-    setDupModal(null)
+    const act = dupModal; setDupModal(null)
     await doLog(act)
   }
 
@@ -232,45 +221,41 @@ export default function TikkyView({ onAdminPress }) {
   }
 
   // ── Derivados ────────────────────────────────────────────────────────────
-  const weekTotal = weekEntries.reduce((s, e) => s + (e.reward || 0), 0)
-  const allTotal  = allEntries.reduce((s, e) => s + (e.reward || 0), 0)
-  const todayKey  = formatDateISO(new Date())
+  const weekTotal    = weekEntries.reduce((s, e) => s + (e.reward || 0), 0)
+  const allTotal     = allEntries.reduce((s, e) => s + (e.reward || 0), 0)
+  const todayKey     = formatDateISO(new Date())
+  // Pendiente = todas las entradas con paid=false y reward>0
+  const pendingTotal = allEntries.filter(e => !e.paid && e.reward > 0).reduce((s, e) => s + e.reward, 0)
 
-  // Total pendiente de cobro: entradas de semanas no pagadas
-  const paidStarts = new Set(paidWeeks.filter(w => w.paid).map(w => w.week_start))
-  const pendingTotal = allEntries
-    .filter(e => !paidStarts.has(getWeekStartStr(new Date(e.logged_at))))
-    .reduce((s, e) => s + (e.reward || 0), 0)
-
-  // Gráfica semanal: Lun a Dom
+  // Gráfica Lun→Dom
   const dailyData = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(monday)
-    d.setDate(monday.getDate() + i)
+    const d = new Date(monday); d.setDate(monday.getDate() + i)
     const key   = formatDateISO(d)
-    const total = weekEntries
-      .filter(e => formatDateISO(new Date(e.logged_at)) === key)
-      .reduce((s, e) => s + (e.reward || 0), 0)
+    const total = weekEntries.filter(e => formatDateISO(new Date(e.logged_at)) === key).reduce((s, e) => s + (e.reward || 0), 0)
     return { label: getDayLabel(key), value: total, key }
   })
   const maxDay = Math.max(...dailyData.map(d => d.value), 1)
 
-  const motiv        = MOTIVATIONAL.find(m => weekTotal >= m.min && weekTotal < m.max) || MOTIVATIONAL[MOTIVATIONAL.length - 1]
-  const earnedBadges = BADGES.filter(b => b.check(weekEntries, weekTotal, allTotal))
-  const kitchenPct   = Math.min((kitchenDays / KITCHEN_GOAL) * 100, 100)
+  const motiv      = MOTIVATIONAL.find(m => weekTotal >= m.min && weekTotal < m.max) || MOTIVATIONAL[MOTIVATIONAL.length - 1]
+  const kitchenPct = Math.min((kitchenDays / KITCHEN_GOAL) * 100, 100)
 
-  // Excluir "Cocina + limpieza" de la lista de actividades (tiene su propia sección)
+  // Actividades: excluir "Cocina + limpieza" (tiene su propia sección)
   const displayActivities = activities.filter(a => a.name !== KITCHEN_NAME)
-
-  const todayEntryNames = weekEntries
-    .filter(e => formatDateISO(new Date(e.logged_at)) === todayKey)
-    .map(e => e.activity_name)
-  const pendingToday = displayActivities.filter(a => !todayEntryNames.includes(a.name))
+  const todayNames = weekEntries.filter(e => formatDateISO(new Date(e.logged_at)) === todayKey).map(e => e.activity_name)
+  const pendingToday = displayActivities.filter(a => !todayNames.includes(a.name))
 
   // Historial: excluir marcas de día de cocina sin €
   const historyEntries = weekEntries.filter(e => !(e.activity_name === KITCHEN_NAME && e.reward === 0))
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] pb-24">
+
+      {/* Toast bono automático */}
+      {bonusToast && (
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 bg-tikky-rose text-white px-5 py-3 rounded-2xl shadow-xl text-sm font-semibold whitespace-nowrap">
+          🏡 ¡Bono completado! +50€ añadidos automáticamente
+        </div>
+      )}
 
       {/* Modal duplicado */}
       {dupModal && (
@@ -311,7 +296,7 @@ export default function TikkyView({ onAdminPress }) {
 
       <div className="px-4 pt-4 space-y-4">
 
-        {/* Hero: total semanal + pendiente de cobro */}
+        {/* Hero: total semanal */}
         <div className="bg-gradient-to-br from-tikky-pink to-tikky-rose rounded-3xl p-5 text-white shadow-md">
           <p className="text-sm opacity-80 mb-1">Esta semana</p>
           <p className="text-5xl font-bold tracking-tight">{weekTotal.toFixed(2)}€</p>
@@ -332,10 +317,7 @@ export default function TikkyView({ onAdminPress }) {
 
         {/* Banner notificaciones */}
         {notifPerm === 'default' && (
-          <button
-            onClick={requestNotifPermission}
-            className="w-full bg-white border border-[#E2E8F0] rounded-2xl px-4 py-3 flex items-center gap-3 text-left active:bg-[#F0FDFA]"
-          >
+          <button onClick={requestNotifPermission} className="w-full bg-white border border-[#E2E8F0] rounded-2xl px-4 py-3 flex items-center gap-3 text-left active:bg-[#F0FDFA]">
             <span className="text-xl">🔔</span>
             <div className="flex-1">
               <p className="text-sm font-medium text-gray-800">Activar recordatorios</p>
@@ -387,38 +369,27 @@ export default function TikkyView({ onAdminPress }) {
           )}
         </section>
 
-        {/* Bono Cocina + Limpieza */}
+        {/* Bono Cocina + Limpieza (bono automático al llegar a 5) */}
         <section className="bg-white rounded-2xl p-4 border border-[#E2E8F0] space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-xl">{KITCHEN_EMOJI}</span>
               <div>
                 <p className="text-sm font-semibold text-gray-800">Bono Cocina + Limpieza</p>
-                <p className="text-xs text-gray-400">{kitchenDays} de {KITCHEN_GOAL} días esta semana</p>
+                <p className="text-xs text-gray-400">{Math.min(kitchenDays, KITCHEN_GOAL)} de {KITCHEN_GOAL} días esta semana</p>
               </div>
             </div>
             <span className="text-lg">🏅</span>
           </div>
 
           <div className="h-2 bg-tikky-lavender rounded-full overflow-hidden">
-            <div
-              className="h-full bg-tikky-pink rounded-full transition-all duration-500"
-              style={{ width: `${kitchenPct}%` }}
-            />
+            <div className="h-full bg-tikky-pink rounded-full transition-all duration-500" style={{ width: `${kitchenPct}%` }} />
           </div>
 
           {kitchenClaimed ? (
             <div className="w-full bg-[#F0FDFA] border border-tikky-lavender text-tikky-pink font-semibold py-3 rounded-2xl text-sm text-center">
-              ✓ Bono cobrado esta semana
+              ✓ ¡Bono de 50€ completado esta semana!
             </div>
-          ) : kitchenDays >= KITCHEN_GOAL ? (
-            <button
-              onClick={claimKitchenBonus}
-              disabled={claimLoading}
-              className="w-full bg-tikky-pink text-white font-bold py-3 rounded-2xl text-sm active:opacity-80"
-            >
-              {claimLoading ? '⏳ Procesando...' : '💰 Cobrar 50€'}
-            </button>
           ) : kitchenToday ? (
             <button disabled className="w-full bg-[#F0FDFA] border border-tikky-lavender text-gray-400 font-medium py-3 rounded-2xl text-sm cursor-not-allowed">
               ✓ Ya registrado hoy — vuelve mañana
@@ -435,12 +406,12 @@ export default function TikkyView({ onAdminPress }) {
 
           {kitchenDays > 0 && kitchenDays < KITCHEN_GOAL && !kitchenClaimed && (
             <p className="text-xs text-gray-400 text-center">
-              Te quedan {KITCHEN_GOAL - kitchenDays} día{KITCHEN_GOAL - kitchenDays > 1 ? 's' : ''} para el bono 🎯
+              {KITCHEN_GOAL - kitchenDays} día{KITCHEN_GOAL - kitchenDays > 1 ? 's' : ''} más para el bono automático 🎯
             </p>
           )}
         </section>
 
-        {/* Gráfica diaria — orden Lun a Dom */}
+        {/* Gráfica Lun→Dom */}
         <section className="bg-white rounded-2xl p-4 border border-[#E2E8F0]">
           <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-3">Esta semana</h2>
           <div className="flex items-end gap-1 h-20">
@@ -451,31 +422,11 @@ export default function TikkyView({ onAdminPress }) {
                 <div key={d.key} className="flex-1 flex flex-col items-center gap-1">
                   <div className="w-full flex items-end justify-center" style={{ height: 64 }}>
                     <div
-                      className={`w-full rounded-t-lg transition-all duration-500 ${
-                        isToday ? 'bg-tikky-pink' : d.value > 0 ? 'bg-tikky-lavender' : 'bg-[#E2E8F0]'
-                      }`}
+                      className={`w-full rounded-t-lg transition-all duration-500 ${isToday ? 'bg-tikky-pink' : d.value > 0 ? 'bg-tikky-lavender' : 'bg-[#E2E8F0]'}`}
                       style={{ height: `${Math.max(pct, d.value > 0 ? 8 : 4)}%` }}
                     />
                   </div>
-                  <span className={`text-[10px] font-medium ${isToday ? 'text-tikky-pink' : 'text-gray-400'}`}>
-                    {d.label}
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-        </section>
-
-        {/* Insignias */}
-        <section className="bg-white rounded-2xl p-4 border border-[#E2E8F0]">
-          <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-3">Insignias</h2>
-          <div className="grid grid-cols-3 gap-2">
-            {BADGES.map((badge) => {
-              const earned = earnedBadges.some(b => b.id === badge.id)
-              return (
-                <div key={badge.id} className={`flex flex-col items-center gap-1 p-2 rounded-xl ${earned ? 'bg-tikky-soft' : 'opacity-30'}`}>
-                  <span className="text-2xl">{badge.emoji}</span>
-                  <span className="text-[10px] text-center text-gray-600 leading-tight">{badge.label}</span>
+                  <span className={`text-[10px] font-medium ${isToday ? 'text-tikky-pink' : 'text-gray-400'}`}>{d.label}</span>
                 </div>
               )
             })}
@@ -490,29 +441,24 @@ export default function TikkyView({ onAdminPress }) {
               {showHistory ? 'Ocultar' : 'Ver todo'}
             </button>
           </div>
-          <div className="space-y-2">
-            {(showHistory ? historyEntries : historyEntries.slice(0, 5)).map((e, i) => {
-              const date = new Date(e.logged_at)
-              return (
-                <div key={e.id || i} className="flex items-center gap-3">
-                  <span className="text-lg">{e.activity_emoji}</span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-gray-800 truncate">{e.activity_name}</p>
-                    <p className="text-xs text-gray-400">
-                      {getDayLabel(formatDateISO(date))} {date.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}
-                    </p>
-                  </div>
-                  <span className="text-tikky-pink font-semibold text-sm">+{e.reward}€</span>
-                  <button
-                    onClick={() => deleteEntry(e.id)}
-                    disabled={deletingId === e.id}
-                    className="w-7 h-7 flex items-center justify-center rounded-lg bg-red-50 text-red-400 active:bg-red-100 text-xs flex-shrink-0"
-                  >
-                    {deletingId === e.id ? '…' : '✕'}
-                  </button>
+          <div className="space-y-2.5">
+            {(showHistory ? historyEntries : historyEntries.slice(0, 5)).map((e, i) => (
+              <div key={e.id || i} className="flex items-center gap-3">
+                <span className="text-lg flex-shrink-0">{e.activity_emoji}</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-gray-800 truncate">{e.activity_name}</p>
+                  <p className="text-xs text-gray-400">{formatTimestamp(e.logged_at)}</p>
                 </div>
-              )
-            })}
+                <span className="text-tikky-pink font-semibold text-sm flex-shrink-0">+{e.reward}€</span>
+                <button
+                  onClick={() => deleteEntry(e.id)}
+                  disabled={deletingId === e.id}
+                  className="w-7 h-7 flex items-center justify-center rounded-lg bg-red-50 text-red-400 active:bg-red-100 text-xs flex-shrink-0"
+                >
+                  {deletingId === e.id ? '…' : '✕'}
+                </button>
+              </div>
+            ))}
             {historyEntries.length === 0 && (
               <p className="text-sm text-gray-400 text-center py-2">Sin actividades esta semana</p>
             )}

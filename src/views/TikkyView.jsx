@@ -6,18 +6,18 @@ const KITCHEN_EMOJI = '🍳'
 const KITCHEN_GOAL  = 5
 const KITCHEN_BONUS = 50
 
-// Lunes de la semana de una fecha → YYYY-MM-DD
-function getWeekStartStr(date) {
+// Lunes de la semana de una fecha → Date local (medianoche)
+function getWeekStart(date = new Date()) {
   const d = new Date(date)
-  const day = d.getDay()
+  const day = d.getDay() // 0=Dom, 1=Lun...6=Sáb
   const diff = day === 0 ? -6 : 1 - day
   d.setDate(d.getDate() + diff)
   d.setHours(0, 0, 0, 0)
-  return d.toISOString().split('T')[0]
+  return d
 }
 
 function getWeekBounds() {
-  const monday = new Date(getWeekStartStr(new Date()) + 'T00:00:00')
+  const monday = getWeekStart()
   const sunday = new Date(monday)
   sunday.setDate(monday.getDate() + 6)
   sunday.setHours(23, 59, 59, 999)
@@ -227,12 +227,14 @@ export default function TikkyView({ onAdminPress }) {
   // Pendiente = todas las entradas con paid=false y reward>0
   const pendingTotal = allEntries.filter(e => !e.paid && e.reward > 0).reduce((s, e) => s + e.reward, 0)
 
-  // Gráfica Lun→Dom
+  // Gráfica Lun→Dom (etiquetas fijas por posición, no por getDay)
+  const weekDays = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
+  const weekStart = getWeekStart()
   const dailyData = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(monday); d.setDate(monday.getDate() + i)
+    const d = new Date(weekStart); d.setDate(weekStart.getDate() + i)
     const key   = formatDateISO(d)
     const total = weekEntries.filter(e => formatDateISO(new Date(e.logged_at)) === key).reduce((s, e) => s + (e.reward || 0), 0)
-    return { label: getDayLabel(key), value: total, key }
+    return { label: weekDays[i], value: total, key }
   })
   const maxDay = Math.max(...dailyData.map(d => d.value), 1)
 

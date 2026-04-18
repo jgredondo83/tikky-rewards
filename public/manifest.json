@@ -4,8 +4,8 @@
   "description": "Tu app de recompensas personal",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#fdf2f8",
-  "theme_color": "#f472b6",
+  "background_color": "#F0FDFA",
+  "theme_color": "#0D9488",
   "orientation": "portrait",
   "icons": [
     {
